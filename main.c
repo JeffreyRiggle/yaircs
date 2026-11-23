@@ -4,14 +4,22 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/event.h>
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <fcntl.h>
+
+#define RLP_WELCOME 1
+#define ERR_NONICKNAMEGIVEN 431
+#define ERR_ERRONEUSNICKNAME 432
+#define ERR_NICKNAMEINUSE 433
+#define ERR_NICKCOLLISION 436
 
 typedef struct {
     int fd;
     char* nick;
     char* user_name;
     char* real_name;
+    char* host_name;
 } user_t;
 
 typedef struct {
@@ -30,6 +38,25 @@ int set_nonblocking(int fd) {
     }
 
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+char* get_address(void *addr) {
+    char* client_ip = malloc(INET6_ADDRSTRLEN);
+    struct sockaddr_storage *sas = addr;
+    void *src;
+
+    if (sas->ss_family == AF_INET) {
+        struct sockaddr_in* sa4 = addr;
+        src = &(sa4->sin_addr);
+    } else if (sas->ss_family == AF_INET6) {
+        struct sockaddr_in6* sa6 = addr;
+        src = &(sa6->sin6_addr);
+    } else {
+        return NULL;
+    }
+
+    inet_ntop(sas->ss_family, src, client_ip, sizeof(client_ip));
+    return client_ip;
 }
 
 int connect_server() {
@@ -71,19 +98,14 @@ int connect_server() {
     return server_fd;
 }
 
-void process_cap(user_t* user, char* cmd, char* args, char* arg_ptr) {
+int process_cap(user_t* user, char* cmd, char* args, char* arg_ptr) {
     if (strcasecmp(cmd, "LS") == 0) {
-        printf("Processing CAP LS\n");
-        // Faking for now this just preends I don't handle caps but I would like to.
-        char res_buffer[512];
-        snprintf(res_buffer, sizeof(res_buffer), ":local 001 anon :Welcome to the Internet Relay Network anon!anon@anon\r\n");
-        if (send(user->fd, res_buffer, sizeof(res_buffer), MSG_NOSIGNAL) == -1) {
-            fprintf(stderr, "failed to send %zu bytes to fd %d\n", sizeof(res_buffer), user->fd);
-        }
+        // TODO make this work
     }
+    return 0;
 }
 
-void process_ping(user_t* user, char* message) {
+int process_ping(user_t* user, char* message) {
     if (message == NULL) {
         message = "";
     }
@@ -93,17 +115,53 @@ void process_ping(user_t* user, char* message) {
     if (send(user->fd, res_buffer, sizeof(res_buffer), MSG_NOSIGNAL) == -1) {
         fprintf(stderr, "failed to send %zu bytes to fd %d\n", sizeof(res_buffer), user->fd);
     }
+
+    return 0;
 }
 
-// TODO this is missing all sorts of validation
-void process_nick(user_t* user, char* nick) {
+int is_nick_valid(char* nick) {
+    if (
+        strncmp(nick, ":", 1) == 0 && 
+        strncmp(nick, "#", 1) == 0 &&
+        strncmp(nick, "&#", 2) == 0 &&
+        strchr(nick, " " != NULL)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+int is_nick_in_use(char* nick) {
+    for (int i = 0; i < sizeof(users); i++) {
+        if (strcasecmp(users[i].nick, nick) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+int process_nick(user_t* user, char* nick) {
+    if (nick == NULL) {
+        return ERR_NONICKNAMEGIVEN;
+    }
+
+    if (is_nick_valid(nick) != 0) {
+        return ERR_ERRONEUSNICKNAME;
+    }
+
+    if (is_nick_in_use(nick)) {
+        return ERR_NICKNAMEINUSE;
+    }
+
     char *dest = malloc(sizeof(nick) + 1);
     strcpy(dest, nick);
     user->nick = dest;
+    return 0;
 }
 
 // TODO read the docs on this.
-void process_user(user_t* user, char* user_param, char* mode_param, char* real_name) {
+int process_user(user_t* user, char* user_param, char* mode_param, char* real_name) {
     char *un_dest = malloc(sizeof(user_param) + 1);
     strcpy(un_dest, user_param);
 
@@ -112,6 +170,7 @@ void process_user(user_t* user, char* user_param, char* mode_param, char* real_n
 
     user->user_name = un_dest;
     user->real_name = rn_dest;
+    return 0;
 }
 
 void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
@@ -119,6 +178,7 @@ void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
     char *save_ptr = NULL;
     char *cmd_line = strtok_r(tcp_buffer.body, "\r\n", &save_ptr);
 
+    int is_greeting = 0;
     while (cmd_line != NULL) {
         printf("Processing %s\n", cmd_line);
 
@@ -127,7 +187,7 @@ void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
 
         if (strcasecmp(user_cmd, "CAP") == 0) {
             char* cap_command = strtok_r(NULL, " ", &cmd_save_ptr);
-            process_cap(user, cap_command, user_cmd, cmd_save_ptr);
+            is_greeting = process_cap(user, cap_command, user_cmd, cmd_save_ptr);
         } else if(strcasecmp(user_cmd, "NICK") == 0) {
             char* nick = strtok_r(NULL, " ", &cmd_save_ptr);
             process_nick(user, nick);
@@ -136,11 +196,24 @@ void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
             char* mode_param = strtok_r(NULL, " ", &cmd_save_ptr);
             char* real_name = strtok_r(NULL, " ", &cmd_save_ptr);
             process_user(user, user_param, mode_param, real_name);
-        }else if (strcasecmp(user_cmd, "PING") == 0) {
+        } else if (strcasecmp(user_cmd, "PING") == 0) {
             char* message = strtok_r(NULL, " ", &cmd_save_ptr);
             process_ping(user, message);
         }
+
         cmd_line = strtok_r(NULL, "\r\n", &save_ptr);
+    }
+
+    if (is_greeting == 1) {
+        char res_buffer[512];
+        snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":local 001 %s :Welcome to IRC %s!%s@%s\r\n",
+            user->nick, user->nick, user->user_name, user->host_name
+        );
+        if (send(user->fd, res_buffer, sizeof(res_buffer), MSG_NOSIGNAL) == -1) {
+            fprintf(stderr, "failed to send %zu bytes to fd %d\n", sizeof(res_buffer), user->fd);
+        }
     }
 }
 
@@ -179,6 +252,7 @@ void process_event(struct kevent evt, int server_fd, struct kevent* change_event
 
         user_t user = {0};
         user.fd = client_fd;
+        user.host_name = get_address(&client_addr);
         users[0] = user;
         return;
     }
