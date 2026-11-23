@@ -1,0 +1,16 @@
+
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug IRC Server",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/irc-server",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "preLaunchTask": "Build C",
+      "stopOnEntry": false
+    }
+  ]
+}

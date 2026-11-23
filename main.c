@@ -1,0 +1,249 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/event.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+
+typedef struct {
+    int fd;
+    char* nick;
+    char* user_name;
+    char* real_name;
+} user_t;
+
+typedef struct {
+  int len;
+  char* body;
+} tcp_buf_t;
+
+char message_buffer[4096];
+// Consider how many users we actually want to support
+user_t users[1024];
+
+int set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+        return flags;
+    }
+
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+int connect_server() {
+    struct sockaddr_in server_addr;
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd == -1) {
+        fprintf(stderr, "Failed to get socket for TCP server\n");
+        return -1;
+    }
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(6667);
+
+    int bind_res = bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+    if (bind_res < 0) {
+        fprintf(stderr, "Failed to bind server on socket %d. Closing server socket!\n", bind_res);
+        close(server_fd);
+        return -1;
+    }
+
+    int listen_res = listen(server_fd, SOMAXCONN);
+    if (listen_res < 0) {
+        fprintf(stderr, "Failed to listen on TCP server %d. Closing server socket!\n", listen_res);
+        close(server_fd);
+        return -1;
+    }
+
+    int nonblocking_res = set_nonblocking(server_fd);
+    if (nonblocking_res == -1) {
+        fprintf(stderr, "Failed to set nonblocking mode. Closing server socket!\n");
+        return -1;
+    }
+
+    return server_fd;
+}
+
+void process_cap(user_t* user, char* cmd, char* args, char* arg_ptr) {
+    if (strcasecmp(cmd, "LS") == 0) {
+        printf("Processing CAP LS\n");
+        // Faking for now this just preends I don't handle caps but I would like to.
+        char res_buffer[512];
+        snprintf(res_buffer, sizeof(res_buffer), ":local 001 anon :Welcome to the Internet Relay Network anon!anon@anon\r\n");
+        if (send(user->fd, res_buffer, sizeof(res_buffer), MSG_NOSIGNAL) == -1) {
+            fprintf(stderr, "failed to send %zu bytes to fd %d\n", sizeof(res_buffer), user->fd);
+        }
+    }
+}
+
+void process_ping(user_t* user, char* message) {
+    if (message == NULL) {
+        message = "";
+    }
+    // Consider ping could be result in a large message that could not be written
+    char res_buffer[512];
+    snprintf(res_buffer, sizeof(res_buffer), ":local PONG local %s", message);
+    if (send(user->fd, res_buffer, sizeof(res_buffer), MSG_NOSIGNAL) == -1) {
+        fprintf(stderr, "failed to send %zu bytes to fd %d\n", sizeof(res_buffer), user->fd);
+    }
+}
+
+// TODO this is missing all sorts of validation
+void process_nick(user_t* user, char* nick) {
+    char *dest = malloc(sizeof(nick) + 1);
+    strcpy(dest, nick);
+    user->nick = dest;
+}
+
+// TODO read the docs on this.
+void process_user(user_t* user, char* user_param, char* mode_param, char* real_name) {
+    char *un_dest = malloc(sizeof(user_param) + 1);
+    strcpy(un_dest, user_param);
+
+    char *rn_dest = malloc(sizeof(real_name) + 1);
+    strcpy(rn_dest, real_name);
+
+    user->user_name = un_dest;
+    user->real_name = rn_dest;
+}
+
+void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
+    printf("Got message %s\n from %d\n", tcp_buffer.body, user->fd);
+    char *save_ptr = NULL;
+    char *cmd_line = strtok_r(tcp_buffer.body, "\r\n", &save_ptr);
+
+    while (cmd_line != NULL) {
+        printf("Processing %s\n", cmd_line);
+
+        char *cmd_save_ptr = NULL;
+        char *user_cmd = strtok_r(cmd_line, " ", &cmd_save_ptr);
+
+        if (strcasecmp(user_cmd, "CAP") == 0) {
+            char* cap_command = strtok_r(NULL, " ", &cmd_save_ptr);
+            process_cap(user, cap_command, user_cmd, cmd_save_ptr);
+        } else if(strcasecmp(user_cmd, "NICK") == 0) {
+            char* nick = strtok_r(NULL, " ", &cmd_save_ptr);
+            process_nick(user, nick);
+        } else if (strcasecmp(user_cmd, "USER") == 0) {
+            char* user_param = strtok_r(NULL, " ", &cmd_save_ptr);
+            char* mode_param = strtok_r(NULL, " ", &cmd_save_ptr);
+            char* real_name = strtok_r(NULL, " ", &cmd_save_ptr);
+            process_user(user, user_param, mode_param, real_name);
+        }else if (strcasecmp(user_cmd, "PING") == 0) {
+            char* message = strtok_r(NULL, " ", &cmd_save_ptr);
+            process_ping(user, message);
+        }
+        cmd_line = strtok_r(NULL, "\r\n", &save_ptr);
+    }
+}
+
+void process_event(struct kevent evt, int server_fd, struct kevent* change_event, int kqueue_fd) {
+    // TODO handle events
+    int target_fd = evt.ident;
+
+    if (evt.flags & EV_EOF) {
+        printf("Client has disconnected closing fd %d\n", target_fd);
+        close(target_fd);
+        return;
+    }
+
+    if (target_fd == server_fd) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+
+        if (client_fd == -1) {
+            fprintf(stderr, "Failed to accept connection!\n");
+            return;
+        }
+
+        int nonblocking_res = set_nonblocking(client_fd);
+        if (nonblocking_res == -1) {
+            fprintf(stderr, "Failed to set client connection to nonblocking, terminating connection");
+            close(client_fd);
+            return;
+        }
+
+        EV_SET(change_event, client_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, NULL);
+        if (kevent(kqueue_fd, change_event, 1, NULL, 0, NULL) == -1) {
+            fprintf(stderr, "Failed to register client to a new socket\n");
+            close(client_fd);
+        }
+
+        user_t user = {0};
+        user.fd = client_fd;
+        users[0] = user;
+        return;
+    }
+
+    if (evt.filter == EVFILT_READ) {
+        ssize_t bytes_read = read(target_fd, message_buffer, sizeof(message_buffer));
+
+        if (bytes_read > 0) {
+            tcp_buf_t tcp_buffer;
+            tcp_buffer.body = message_buffer;
+            tcp_buffer.len = bytes_read;
+
+            // TODO get the correct user
+            process_user_data(&users[0], tcp_buffer);
+            return;
+        }
+
+        if (bytes_read == 0) {
+            printf("Unable to read data killing connection\n");
+            close(target_fd);
+            return;
+        }
+
+        printf("Failed to read data\n");
+    }
+}
+
+int main() {
+    int kqueue_fd;
+    struct kevent change_event, event_list[32];
+
+    int server_fd = connect_server();
+
+    if (server_fd == -1) {
+        fprintf(stderr, "Failed to create server\n");
+    }
+
+    kqueue_fd = kqueue();
+    if (kqueue_fd == -1) {
+        fprintf(stderr, "Failed to create queue. Closing server\n");
+        close(server_fd);
+        return -1;
+    }
+
+    EV_SET(&change_event, server_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, NULL);
+    if (kevent(kqueue_fd, &change_event, 1, NULL, 0, NULL) == -1) {
+        fprintf(stderr, "Failed to register socket closing server\n");
+        close(server_fd);
+        return -1;
+    }
+
+    while(1) {
+        int event_count = kevent(kqueue_fd, NULL, 0, event_list, 32, NULL);
+        if (event_count == -1) {
+            fprintf(stderr, "Failed to wait on kqueue\n");
+            break;
+        }
+
+        for (int i = 0; i < event_count; i++) {
+            struct kevent target_event = event_list[i];
+            process_event(target_event, server_fd, &change_event, kqueue_fd);
+        }
+    }
+
+    close(server_fd);
+    close(kqueue_fd);
+    return 0;
+}
