@@ -39,7 +39,7 @@ user_t users[1024];
 
 void send_response_to_user(user_t* user, char* res_buffer, int message_length) {
     if (send(user->fd, res_buffer, message_length, MSG_NOSIGNAL) == -1) {
-        fprintf(stderr, "failed to send %zu bytes to fd %d\n", message_length, user->fd);
+        fprintf(stderr, "failed to send %d bytes to fd %d\n", message_length, user->fd);
     }
 }
 
@@ -153,9 +153,10 @@ int is_nick_in_use(char* nick) {
     return 0;
 }
 
-int process_nick(user_t* user, char* nick) {
+void process_nick(user_t* user, char* nick) {
+    char res_buffer[512];
+
     if (nick == NULL) {
-        char res_buffer[512];
         int message_length = snprintf(
             res_buffer, sizeof(res_buffer),
             ":%s %03d %s :No nickname given\r\n",
@@ -163,11 +164,10 @@ int process_nick(user_t* user, char* nick) {
             user->nick ? user->nick : "*"
         );
         send_response_to_user(user, res_buffer, message_length);
-        return ERR_NONICKNAMEGIVEN;
+        return;
     }
 
     if (is_nick_valid(nick) != 1) {
-        char res_buffer[512];
         int message_length = snprintf(
             res_buffer, sizeof(res_buffer),
             ":%s %03d %s :Erroneus nickname\r\n",
@@ -175,11 +175,10 @@ int process_nick(user_t* user, char* nick) {
             user->nick ? user->nick : "*"
         );
         send_response_to_user(user, res_buffer, message_length);
-        return ERR_ERRONEUSNICKNAME;
+        return;
     }
 
     if (is_nick_in_use(nick)) {
-        char res_buffer[512];
         int message_length = snprintf(
             res_buffer, sizeof(res_buffer),
             ":%s %03d %s :Nickname is already in use\r\n",
@@ -187,16 +186,23 @@ int process_nick(user_t* user, char* nick) {
             user->nick ? user->nick : "*"
         );
         send_response_to_user(user, res_buffer, message_length);
-        return ERR_NICKNAMEINUSE;
+        return;
     }
+
+    int message_length = snprintf(
+        res_buffer, sizeof(res_buffer),
+        ":%s NICK %s\r\n",
+        user->nick ? user->nick : "*",
+        nick
+    );
 
     char *dest = malloc(sizeof(nick) + 1);
     strcpy(dest, nick);
     user->nick = dest;
-    return 0;
+    send_response_to_user(user, res_buffer, message_length);
 }
 
-int process_user(user_t* user, char* user_name, char* mode_param, char* real_name) {
+void process_user(user_t* user, char* user_name, char* mode_param, char* real_name) {
     if (real_name == NULL) {
         char res_buffer[512];
         int message_length = snprintf(
@@ -206,7 +212,7 @@ int process_user(user_t* user, char* user_name, char* mode_param, char* real_nam
             user->nick ? user->nick : "*"
         );
         send_response_to_user(user, res_buffer, message_length);
-        return ERR_NEEDMOREPARAMS;
+        return;
     }
 
     if (user->user_name != NULL) {
@@ -218,7 +224,7 @@ int process_user(user_t* user, char* user_name, char* mode_param, char* real_nam
             user->nick ? user->nick : "*"
         );
         send_response_to_user(user, res_buffer, message_length);
-        return ERR_ALREADYREGISTERED;
+        return;
     }
 
     char *un_dest = malloc(sizeof(user_name) + 1);
@@ -229,17 +235,14 @@ int process_user(user_t* user, char* user_name, char* mode_param, char* real_nam
 
     user->user_name = un_dest;
     user->real_name = rn_dest;
-    return 0;
 }
 
 void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
-    printf("%d Message: %s\n", user->fd, tcp_buffer.body);
+    printf("Message from fd %d:\r\n %s\r\n", user->fd, tcp_buffer.body);
     char *save_ptr = NULL;
     char *cmd_line = strtok_r(tcp_buffer.body, "\r\n", &save_ptr);
 
     while (cmd_line != NULL) {
-        printf("Processing: %s\n", cmd_line);
-
         char *cmd_save_ptr = NULL;
         char *user_cmd = strtok_r(cmd_line, " ", &cmd_save_ptr);
 
@@ -248,20 +251,12 @@ void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
             process_cap(user, cap_command, user_cmd, cmd_save_ptr);
         } else if (strcasecmp(user_cmd, "NICK") == 0) {
             char* nick = strtok_r(NULL, " ", &cmd_save_ptr);
-
-            // Should I ignore subsequent commands?
-            if (process_nick(user, nick) != 0) {
-                break;
-            }
+            process_nick(user, nick);
         } else if (strcasecmp(user_cmd, "USER") == 0) {
             char* user_param = strtok_r(NULL, " ", &cmd_save_ptr);
             char* mode_param = strtok_r(NULL, " ", &cmd_save_ptr);
             char* real_name = strtok_r(NULL, " ", &cmd_save_ptr);
-            
-            // Should I ignore subsequent commands?
-            if (process_user(user, user_param, mode_param, real_name) != 0) {
-                break;
-            }
+            process_user(user, user_param, mode_param, real_name);
         } else if (strcasecmp(user_cmd, "PING") == 0) {
             char* message = strtok_r(NULL, " ", &cmd_save_ptr);
             process_ping(user, message);
