@@ -13,6 +13,11 @@
 #define ERR_ERRONEUSNICKNAME 432
 #define ERR_NICKNAMEINUSE 433
 #define ERR_NICKCOLLISION 436
+#define ERR_NEEDMOREPARAMS 461
+#define ERR_ALREADYREGISTERED 462
+
+// TODO this should not be fixed like this
+static char* server_name = "local";
 
 typedef struct {
     int fd;
@@ -20,6 +25,7 @@ typedef struct {
     char* user_name;
     char* real_name;
     char* host_name;
+    int connection_established;
 } user_t;
 
 typedef struct {
@@ -30,6 +36,12 @@ typedef struct {
 char message_buffer[4096];
 // Consider how many users we actually want to support
 user_t users[1024];
+
+void send_response_to_user(user_t* user, char* res_buffer, int message_length) {
+    if (send(user->fd, res_buffer, message_length, MSG_NOSIGNAL) == -1) {
+        fprintf(stderr, "failed to send %zu bytes to fd %d\n", message_length, user->fd);
+    }
+}
 
 int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -105,18 +117,13 @@ int process_cap(user_t* user, char* cmd, char* args, char* arg_ptr) {
     return 0;
 }
 
-int process_ping(user_t* user, char* message) {
+void process_ping(user_t* user, char* message) {
     if (message == NULL) {
         message = "";
     }
-    // Consider ping could be result in a large message that could not be written
     char res_buffer[512];
-    snprintf(res_buffer, sizeof(res_buffer), ":local PONG local %s", message);
-    if (send(user->fd, res_buffer, sizeof(res_buffer), MSG_NOSIGNAL) == -1) {
-        fprintf(stderr, "failed to send %zu bytes to fd %d\n", sizeof(res_buffer), user->fd);
-    }
-
-    return 0;
+    int message_length = snprintf(res_buffer, sizeof(res_buffer), ":%s PONG %s :%s\r\n", server_name, server_name, message);
+    send_response_to_user(user, res_buffer, message_length);
 }
 
 int is_nick_valid(char* nick) {
@@ -132,7 +139,12 @@ int is_nick_valid(char* nick) {
 }
 
 int is_nick_in_use(char* nick) {
-    for (int i = 0; i < sizeof(users); i++) {
+    size_t user_count = sizeof(users) / sizeof(users[0]);
+    for (int i = 0; i < user_count; i++) {
+        if (users[i].nick == NULL) {
+            continue;
+        }
+
         if (strcasecmp(users[i].nick, nick) == 0) {
             return 1;
         }
@@ -143,14 +155,38 @@ int is_nick_in_use(char* nick) {
 
 int process_nick(user_t* user, char* nick) {
     if (nick == NULL) {
+        char res_buffer[512];
+        int message_length = snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":%s %03d %s :No nickname given\r\n",
+            server_name, ERR_NONICKNAMEGIVEN,
+            user->nick ? user->nick : "*"
+        );
+        send_response_to_user(user, res_buffer, message_length);
         return ERR_NONICKNAMEGIVEN;
     }
 
-    if (is_nick_valid(nick) != 0) {
+    if (is_nick_valid(nick) != 1) {
+        char res_buffer[512];
+        int message_length = snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":%s %03d %s :Erroneus nickname\r\n",
+            server_name, ERR_ERRONEUSNICKNAME,
+            user->nick ? user->nick : "*"
+        );
+        send_response_to_user(user, res_buffer, message_length);
         return ERR_ERRONEUSNICKNAME;
     }
 
     if (is_nick_in_use(nick)) {
+        char res_buffer[512];
+        int message_length = snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":%s %03d %s :Nickname is already in use\r\n",
+            server_name, ERR_ERRONEUSNICKNAME,
+            user->nick ? user->nick : "*"
+        );
+        send_response_to_user(user, res_buffer, message_length);
         return ERR_NICKNAMEINUSE;
     }
 
@@ -160,10 +196,33 @@ int process_nick(user_t* user, char* nick) {
     return 0;
 }
 
-// TODO read the docs on this.
-int process_user(user_t* user, char* user_param, char* mode_param, char* real_name) {
-    char *un_dest = malloc(sizeof(user_param) + 1);
-    strcpy(un_dest, user_param);
+int process_user(user_t* user, char* user_name, char* mode_param, char* real_name) {
+    if (real_name == NULL) {
+        char res_buffer[512];
+        int message_length = snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":%s %03d %s USER :Not enough parameters\r\n",
+            server_name, ERR_NEEDMOREPARAMS,
+            user->nick ? user->nick : "*"
+        );
+        send_response_to_user(user, res_buffer, message_length);
+        return ERR_NEEDMOREPARAMS;
+    }
+
+    if (user->user_name != NULL) {
+        char res_buffer[512];
+        int message_length = snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":%s %03d %s :You may not reregister\r\n",
+            server_name, ERR_ALREADYREGISTERED,
+            user->nick ? user->nick : "*"
+        );
+        send_response_to_user(user, res_buffer, message_length);
+        return ERR_ALREADYREGISTERED;
+    }
+
+    char *un_dest = malloc(sizeof(user_name) + 1);
+    strcpy(un_dest, user_name);
 
     char *rn_dest = malloc(sizeof(real_name) + 1);
     strcpy(rn_dest, real_name);
@@ -174,28 +233,35 @@ int process_user(user_t* user, char* user_param, char* mode_param, char* real_na
 }
 
 void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
-    printf("Got message %s\n from %d\n", tcp_buffer.body, user->fd);
+    printf("%d Message: %s\n", user->fd, tcp_buffer.body);
     char *save_ptr = NULL;
     char *cmd_line = strtok_r(tcp_buffer.body, "\r\n", &save_ptr);
 
-    int is_greeting = 0;
     while (cmd_line != NULL) {
-        printf("Processing %s\n", cmd_line);
+        printf("Processing: %s\n", cmd_line);
 
         char *cmd_save_ptr = NULL;
         char *user_cmd = strtok_r(cmd_line, " ", &cmd_save_ptr);
 
         if (strcasecmp(user_cmd, "CAP") == 0) {
             char* cap_command = strtok_r(NULL, " ", &cmd_save_ptr);
-            is_greeting = process_cap(user, cap_command, user_cmd, cmd_save_ptr);
-        } else if(strcasecmp(user_cmd, "NICK") == 0) {
+            process_cap(user, cap_command, user_cmd, cmd_save_ptr);
+        } else if (strcasecmp(user_cmd, "NICK") == 0) {
             char* nick = strtok_r(NULL, " ", &cmd_save_ptr);
-            process_nick(user, nick);
+
+            // Should I ignore subsequent commands?
+            if (process_nick(user, nick) != 0) {
+                break;
+            }
         } else if (strcasecmp(user_cmd, "USER") == 0) {
             char* user_param = strtok_r(NULL, " ", &cmd_save_ptr);
             char* mode_param = strtok_r(NULL, " ", &cmd_save_ptr);
             char* real_name = strtok_r(NULL, " ", &cmd_save_ptr);
-            process_user(user, user_param, mode_param, real_name);
+            
+            // Should I ignore subsequent commands?
+            if (process_user(user, user_param, mode_param, real_name) != 0) {
+                break;
+            }
         } else if (strcasecmp(user_cmd, "PING") == 0) {
             char* message = strtok_r(NULL, " ", &cmd_save_ptr);
             process_ping(user, message);
@@ -204,21 +270,20 @@ void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
         cmd_line = strtok_r(NULL, "\r\n", &save_ptr);
     }
 
-    if (is_greeting == 1) {
+    if (user->connection_established != 1 && user->nick != NULL && user->user_name != NULL) {
+        user->connection_established = 1;
         char res_buffer[512];
-        snprintf(
+        int message_length = snprintf(
             res_buffer, sizeof(res_buffer),
-            ":local 001 %s :Welcome to IRC %s!%s@%s\r\n",
-            user->nick, user->nick, user->user_name, user->host_name
+            ":%s %03d %s :Welcome to IRC %s!%s@%s\r\n",
+            server_name, RLP_WELCOME, user->nick,
+            user->nick, user->user_name, user->host_name
         );
-        if (send(user->fd, res_buffer, sizeof(res_buffer), MSG_NOSIGNAL) == -1) {
-            fprintf(stderr, "failed to send %zu bytes to fd %d\n", sizeof(res_buffer), user->fd);
-        }
+        send_response_to_user(user, res_buffer, message_length);
     }
 }
 
 void process_event(struct kevent evt, int server_fd, struct kevent* change_event, int kqueue_fd) {
-    // TODO handle events
     int target_fd = evt.ident;
 
     if (evt.flags & EV_EOF) {
@@ -261,6 +326,11 @@ void process_event(struct kevent evt, int server_fd, struct kevent* change_event
         ssize_t bytes_read = read(target_fd, message_buffer, sizeof(message_buffer));
 
         if (bytes_read > 0) {
+            // NULL terminate reused buffer
+            if (bytes_read < sizeof(message_buffer)) {
+                message_buffer[bytes_read] = '\0';
+            }
+
             tcp_buf_t tcp_buffer;
             tcp_buffer.body = message_buffer;
             tcp_buffer.len = bytes_read;
