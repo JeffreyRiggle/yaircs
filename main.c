@@ -406,9 +406,9 @@ void process_private_message(user_t* user, int user_index, char* target, char* m
         int message_length = snprintf(
             res_buffer, sizeof(res_buffer),
             ":%s!%s@%s PRIVMSG %s %s\r\n",
-            participant.nick,
-            participant.user_name,
-            participant.host_name,
+            user->nick,
+            user->user_name,
+            user->host_name,
             target,
             message
         );
