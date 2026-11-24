@@ -7,8 +7,14 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <fcntl.h>
+#include <time.h>
 
 #define RLP_WELCOME 1
+#define RPL_NOTOPIC 331
+#define RPL_TOPIC 332
+#define RPL_TOPICWHOTIME 333
+#define RPL_NAMEREPLY 353
+#define RPL_ENDOFNAMES 366
 #define ERR_NONICKNAMEGIVEN 431
 #define ERR_ERRONEUSNICKNAME 432
 #define ERR_NICKNAMEINUSE 433
@@ -29,13 +35,25 @@ typedef struct {
 } user_t;
 
 typedef struct {
+    char* name;
+    char* topic;
+    char* created_by;
+    char* created_at;
+    int participants[256];
+} channel_t;
+
+// I don't really like this name
+typedef struct {
   int len;
   char* body;
 } tcp_buf_t;
 
 char message_buffer[4096];
-// Consider how many users we actually want to support
+// Consider how many users/channels we actually want to support
 user_t users[1024];
+int next_user_slot = 0;
+channel_t channels [1024];
+int next_channel_index = 0;
 
 void send_response_to_user(user_t* user, char* res_buffer, int message_length) {
     if (send(user->fd, res_buffer, message_length, MSG_NOSIGNAL) == -1) {
@@ -67,7 +85,7 @@ char* get_address(void *addr) {
         return NULL;
     }
 
-    inet_ntop(sas->ss_family, src, client_ip, sizeof(client_ip));
+    inet_ntop(sas->ss_family, src, client_ip, INET6_ADDRSTRLEN);
     return client_ip;
 }
 
@@ -110,11 +128,10 @@ int connect_server() {
     return server_fd;
 }
 
-int process_cap(user_t* user, char* cmd, char* args, char* arg_ptr) {
+void process_cap(user_t* user, char* cmd, char* args, char* arg_ptr) {
+    // https://modern.ircdocs.horse/#join-message
     if (strcasecmp(cmd, "LS") == 0) {
-        // TODO make this work
     }
-    return 0;
 }
 
 void process_ping(user_t* user, char* message) {
@@ -154,6 +171,7 @@ int is_nick_in_use(char* nick) {
 }
 
 void process_nick(user_t* user, char* nick) {
+    // https://modern.ircdocs.horse/#join-message
     char res_buffer[512];
 
     if (nick == NULL) {
@@ -237,7 +255,169 @@ void process_user(user_t* user, char* user_name, char* mode_param, char* real_na
     user->real_name = rn_dest;
 }
 
-void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
+channel_t* find_channel(char* name) {
+    for (int i = 0; i < sizeof(channels) / sizeof(channels[0]); i++) {
+        if (channels[i].name != NULL && strcasecmp(channels[i].name, name) == 0) {
+            return &channels[i];
+        }
+    }
+
+    return NULL;
+}
+
+channel_t* get_or_create_channel(char* channel_name) {
+    channel_t* channel = find_channel(channel_name);
+
+    if (channel != NULL) {
+        return channel;
+    }
+
+    channel_t* new_channel = &channels[next_channel_index++];
+
+    char *cn_dest = malloc(sizeof(channel_name) + 1);
+    strcpy(cn_dest, channel_name);
+    
+    new_channel->name = cn_dest;
+    new_channel->participants[0] = -1;
+    return new_channel;
+}
+
+char* get_current_timestamp_utc() {
+    time_t now = time(NULL);
+    struct tm utc_time;
+    char* buffer = malloc(21);
+
+    // TODO handle failure case
+    if (gmtime_r(&now, &utc_time) != NULL) {
+        strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc_time);
+    }
+
+    return buffer;
+}
+
+int get_client_index(int fd) {
+    size_t user_count = sizeof(users) / sizeof(users[0]);
+    for (int i = 0; i < user_count; i++) {
+        if (users[i].fd == fd) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+void process_join(user_t* user, int user_index, char* channel_name, char* key) {
+    // https://modern.ircdocs.horse/#join-message
+    // TODO validation
+
+    channel_t* channel = get_or_create_channel(channel_name);
+    for (int i = 0; i < sizeof(channel->participants) / sizeof(user->fd); i++) {
+        if (channel->participants[i] == -1) {
+            channel->participants[i] = user_index;
+            channel->participants[i + 1] = -1;
+            break;
+        }
+    }
+
+    // Joined channel
+    char res_buffer[512]; 
+    int message_length = snprintf(
+        res_buffer, sizeof(res_buffer),
+        ":%s JOIN %s\r\n",
+        user->nick ? user->nick : "*",
+        channel_name
+    );
+
+    // Topic
+    if (channel->topic != NULL) {
+        message_length += snprintf(
+            res_buffer + message_length, sizeof(res_buffer),
+            ":%s %03d %s :%s\r\n",
+            server_name, RPL_TOPIC, channel_name, channel->topic
+        );
+    } else {
+        message_length += snprintf(
+            res_buffer + message_length, sizeof(res_buffer),
+            ":%s %03d %s :No topic is set\r\n",
+            server_name, RPL_NOTOPIC, channel_name
+        );
+    }
+
+    // Who created the channel
+    if (channel->created_by != NULL) {
+        message_length += snprintf(
+            res_buffer + message_length, sizeof(res_buffer),
+            ":%s %03d %s %s %s\r\n",
+            server_name, RPL_TOPICWHOTIME, channel_name,
+            channel->created_by, channel->created_at
+        );
+    } else {
+        channel->created_by = user->nick;
+        channel->created_at = get_current_timestamp_utc();
+    }
+    
+    // List of users in the channel
+    message_length += snprintf(
+        res_buffer + message_length, sizeof(res_buffer),
+        ":%s %03d %s = %s :",
+        server_name, RPL_NAMEREPLY, user->nick, channel_name 
+    );
+    for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
+        // Finished reading participants.
+        if (channel->participants[i] == -1) {
+            break;
+        }
+
+        message_length += snprintf(
+            res_buffer + message_length, sizeof(res_buffer),
+            " %s",
+            users[channel->participants[i]].nick 
+        );
+    }
+    message_length += snprintf(
+        res_buffer + message_length, sizeof(res_buffer),
+        "\r\n:%s %03d %s %s :End of /Names list\r\n",
+        server_name, RPL_ENDOFNAMES, user->nick, channel_name
+    );
+
+    send_response_to_user(user, res_buffer, message_length);
+}
+
+void process_private_message(user_t* user, int user_index, char* target, char* message) {
+    // https://modern.ircdocs.horse/#privmsg-message
+    // TODO validation
+    // For now lets just assume we can only support channels
+    channel_t* channel = find_channel(target);
+
+    char res_buffer[512];
+    for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
+        int participant_index = channel->participants[i];
+        // Don't send to self
+        if (participant_index == user_index) {
+            continue;
+        }
+        
+        // Finished reading participants.
+        if (participant_index == -1) {
+            break;
+        }
+        
+        user_t participant = users[participant_index];
+        int message_length = snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":%s!%s@%s PRIVMSG %s %s\r\n",
+            participant.nick,
+            participant.user_name,
+            participant.host_name,
+            target,
+            message
+        );
+
+        send_response_to_user(&participant, res_buffer, message_length);
+    }
+}
+
+void process_user_data(user_t* user, int user_index, tcp_buf_t tcp_buffer) {
     printf("Message from fd %d:\r\n %s\r\n", user->fd, tcp_buffer.body);
     char *save_ptr = NULL;
     char *cmd_line = strtok_r(tcp_buffer.body, "\r\n", &save_ptr);
@@ -260,6 +440,15 @@ void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
         } else if (strcasecmp(user_cmd, "PING") == 0) {
             char* message = strtok_r(NULL, " ", &cmd_save_ptr);
             process_ping(user, message);
+        } else if (strcasecmp(user_cmd, "JOIN") == 0) {
+            // TODO support multi channel joins
+            char* channel = strtok_r(NULL, " ", &cmd_save_ptr);
+            char* key = strtok_r(NULL, " ", &cmd_save_ptr);
+            process_join(user, user_index, channel, key);
+        } else if (strcasecmp(user_cmd, "PRIVMSG") == 0) {
+            char* target = strtok_r(NULL, " ", &cmd_save_ptr);
+            char* message = strtok_r(NULL, " ", &cmd_save_ptr);
+            process_private_message(user, user_index, target, message);
         }
 
         cmd_line = strtok_r(NULL, "\r\n", &save_ptr);
@@ -313,7 +502,7 @@ void process_event(struct kevent evt, int server_fd, struct kevent* change_event
         user_t user = {0};
         user.fd = client_fd;
         user.host_name = get_address(&client_addr);
-        users[0] = user;
+        users[next_user_slot++] = user;
         return;
     }
 
@@ -330,8 +519,15 @@ void process_event(struct kevent evt, int server_fd, struct kevent* change_event
             tcp_buffer.body = message_buffer;
             tcp_buffer.len = bytes_read;
 
-            // TODO get the correct user
-            process_user_data(&users[0], tcp_buffer);
+            int client_index = get_client_index(target_fd);
+
+            if (client_index == -1) {
+                fprintf(stderr, "Failed to find user for %d\n", target_fd);
+                close(target_fd);
+                return;
+            }
+
+            process_user_data(&users[client_index], client_index, tcp_buffer);
             return;
         }
 
