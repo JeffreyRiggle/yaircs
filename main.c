@@ -447,7 +447,7 @@ void process_user_data(user_t* user, int user_index, tcp_buf_t tcp_buffer) {
             process_join(user, user_index, channel, key);
         } else if (strcasecmp(user_cmd, "PRIVMSG") == 0) {
             char* target = strtok_r(NULL, " ", &cmd_save_ptr);
-            char* message = strtok_r(NULL, " ", &cmd_save_ptr);
+            char* message = strtok_r(NULL, "", &cmd_save_ptr);
             process_private_message(user, user_index, target, message);
         }
 
