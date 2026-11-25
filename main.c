@@ -21,6 +21,7 @@
 #define ERR_NICKCOLLISION 436
 #define ERR_NEEDMOREPARAMS 461
 #define ERR_ALREADYREGISTERED 462
+#define ERR_BADCHANNELKEY 475
 
 // TODO this should not be fixed like this
 static char* server_name = "local";
@@ -39,6 +40,7 @@ typedef struct {
     char* topic;
     char* created_by;
     char* created_at;
+    char* key;
     int participants[256];
 } channel_t;
 
@@ -265,7 +267,7 @@ channel_t* find_channel(char* name) {
     return NULL;
 }
 
-channel_t* get_or_create_channel(char* channel_name) {
+channel_t* get_or_create_channel(char* channel_name, char* channel_key) {
     channel_t* channel = find_channel(channel_name);
 
     if (channel != NULL) {
@@ -274,11 +276,18 @@ channel_t* get_or_create_channel(char* channel_name) {
 
     channel_t* new_channel = &channels[next_channel_index++];
 
-    char *cn_dest = malloc(sizeof(channel_name) + 1);
+    char* cn_dest = malloc(sizeof(channel_name) + 1);
     strcpy(cn_dest, channel_name);
     
     new_channel->name = cn_dest;
     new_channel->participants[0] = -1;
+    
+    if (channel_key != NULL) {
+        char* k_dest = malloc(sizeof(channel_key) + 1);
+        strcpy(k_dest, channel_key);
+        new_channel->key = k_dest;
+    }
+
     return new_channel;
 }
 
@@ -306,11 +315,25 @@ int get_client_index(int fd) {
     return -1;
 }
 
-void process_join(user_t* user, int user_index, char* channel_name, char* key) {
+void process_join(user_t* user, int user_index, char* channel_name, char* channel_key) {
     // https://modern.ircdocs.horse/#join-message
     // TODO validation
 
-    channel_t* channel = get_or_create_channel(channel_name);
+    char res_buffer[512]; 
+    channel_t* channel = get_or_create_channel(channel_name, channel_key);
+
+    if (channel->key != NULL && (channel_key == NULL || strcasecmp(channel->key, channel_key) != 0)) {
+        int message_length = snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":%s %03d %s %s :Cannot join channel (+k)\r\n",
+            server_name, ERR_BADCHANNELKEY,
+            user->nick ? user->nick : "*",
+            channel_name
+        );
+        send_response_to_user(user, res_buffer, message_length);
+        return;
+    }
+    
     for (int i = 0; i < sizeof(channel->participants) / sizeof(user->fd); i++) {
         if (channel->participants[i] == -1) {
             channel->participants[i] = user_index;
@@ -320,7 +343,6 @@ void process_join(user_t* user, int user_index, char* channel_name, char* key) {
     }
 
     // Joined channel
-    char res_buffer[512]; 
     int message_length = snprintf(
         res_buffer, sizeof(res_buffer),
         ":%s JOIN %s\r\n",
@@ -443,8 +465,8 @@ void process_user_data(user_t* user, int user_index, tcp_buf_t tcp_buffer) {
         } else if (strcasecmp(user_cmd, "JOIN") == 0) {
             // TODO support multi channel joins
             char* channel = strtok_r(NULL, " ", &cmd_save_ptr);
-            char* key = strtok_r(NULL, " ", &cmd_save_ptr);
-            process_join(user, user_index, channel, key);
+            char* channel_key = strtok_r(NULL, " ", &cmd_save_ptr);
+            process_join(user, user_index, channel, channel_key);
         } else if (strcasecmp(user_cmd, "PRIVMSG") == 0) {
             char* target = strtok_r(NULL, " ", &cmd_save_ptr);
             char* message = strtok_r(NULL, "", &cmd_save_ptr);
