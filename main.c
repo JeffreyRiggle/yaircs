@@ -317,6 +317,26 @@ int get_client_index(int fd) {
     return -1;
 }
 
+int add_channel_topic(user_t* user, channel_t* channel, char* buffer, int buffer_size) {
+    if (channel->topic != NULL) {
+        return snprintf(
+            buffer, buffer_size,
+            ":%s %03d %s %s :%s\r\n",
+            server_name, RPL_TOPIC, 
+            user->nick ? user->nick : "*",
+            channel->name, channel->topic
+        );
+    }
+
+    return snprintf(
+        buffer, buffer_size,
+        ":%s %03d %s %s :No topic is set\r\n",
+        server_name, RPL_NOTOPIC,
+        user->nick ? user->nick : "*",
+        channel->name
+    );
+}
+
 void process_join(user_t* user, int user_index, char* channel_name, char* channel_key) {
     // https://modern.ircdocs.horse/#join-message
     // TODO validation
@@ -353,19 +373,7 @@ void process_join(user_t* user, int user_index, char* channel_name, char* channe
     );
 
     // Topic
-    if (channel->topic != NULL) {
-        message_length += snprintf(
-            res_buffer + message_length, sizeof(res_buffer),
-            ":%s %03d %s :%s\r\n",
-            server_name, RPL_TOPIC, channel_name, channel->topic
-        );
-    } else {
-        message_length += snprintf(
-            res_buffer + message_length, sizeof(res_buffer),
-            ":%s %03d %s :No topic is set\r\n",
-            server_name, RPL_NOTOPIC, channel_name
-        );
-    }
+    message_length += add_channel_topic(user, channel, res_buffer + message_length, sizeof(res_buffer));
 
     // Who created the channel
     if (channel->created_by != NULL) {
@@ -440,14 +448,9 @@ void process_private_message(user_t* user, int user_index, char* target, char* m
     }
 }
 
-void process_part(user_t* user, int user_index, char* channel_name, char* reason) {
-    // https://modern.ircdocs.horse/#part-message
+void send_no_such_channel(user_t* user, char* channel_name) {
     char res_buffer[512];
-    int message_length = 0;
-    channel_t* channel = find_channel(channel_name);
-
-    if (channel == NULL) {
-        message_length = snprintf(
+    int message_length = snprintf(
             res_buffer, sizeof(res_buffer),
             ":%s %03d %s %s :No such channel\r\n",
             server_name, ERR_NOSUCHCHANNEL,
@@ -455,11 +458,31 @@ void process_part(user_t* user, int user_index, char* channel_name, char* reason
             channel_name
         );
 
-        send_response_to_user(user, res_buffer, message_length);
+    send_response_to_user(user, res_buffer, message_length);
+}
+
+void send_not_in_channel(user_t* user, char* channel_name) {
+    char res_buffer[512];
+    int message_length = snprintf(
+        res_buffer, sizeof(res_buffer),
+        ":%s %03d %s %s :You're not on that channel\r\n",
+        server_name, ERR_NOTONCHANNEL,
+        user->nick ? user->nick : "*",
+        channel_name
+    );
+
+    send_response_to_user(user, res_buffer, message_length);
+}
+
+void process_part(user_t* user, int user_index, char* channel_name, char* reason) {
+    // https://modern.ircdocs.horse/#part-message
+    channel_t* channel = find_channel(channel_name);
+
+    if (channel == NULL) {
+        send_no_such_channel(user, channel_name);
         return;
     }
 
-    // If they are not in the channel ERR_NOTINCHANNEL 442
     int channel_index = -1;
     for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
         if (channel->participants[i] == user_index) {
@@ -469,15 +492,7 @@ void process_part(user_t* user, int user_index, char* channel_name, char* reason
     }
 
     if (channel_index == -1) {
-        message_length = snprintf(
-            res_buffer, sizeof(res_buffer),
-            ":%s %03d %s %s :You're not on that channel\r\n",
-            server_name, ERR_NOTONCHANNEL,
-            user->nick ? user->nick : "*",
-            channel_name
-        );
-
-        send_response_to_user(user, res_buffer, message_length);
+        send_not_in_channel(user, channel_name);
         return;
     }
 
@@ -487,6 +502,7 @@ void process_part(user_t* user, int user_index, char* channel_name, char* reason
         return;
     }
 
+    char res_buffer[512];
     for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
         int participant_index = channel->participants[i];
         // Don't send to self
@@ -500,7 +516,7 @@ void process_part(user_t* user, int user_index, char* channel_name, char* reason
         }
         
         user_t participant = users[participant_index];
-        message_length = snprintf(
+        int message_length = snprintf(
             res_buffer, sizeof(res_buffer),
             ":%s!%s@%s PRIVMSG %s %s\r\n",
             user->nick,
@@ -510,6 +526,51 @@ void process_part(user_t* user, int user_index, char* channel_name, char* reason
             reason
         );
 
+        send_response_to_user(&participant, res_buffer, message_length);
+    }
+}
+
+void process_topic(user_t* user, int user_index, char* channel_name, char* topic) {
+    // https://modern.ircdocs.horse/#topic-message
+    char res_buffer[512]; 
+    channel_t* channel = find_channel(channel_name);
+
+    if (channel == NULL) {
+        send_no_such_channel(user, channel_name);
+        return;
+    }
+
+    int channel_index = -1;
+    for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
+        if (channel->participants[i] == user_index) {
+            channel_index = i;
+            break;
+        }
+    }
+
+    if (channel_index == -1) {
+        send_not_in_channel(user, channel_name);
+        return;
+    }
+
+    if (topic == NULL) {
+        int message_length = add_channel_topic(user, channel, res_buffer, sizeof(res_buffer));
+        send_response_to_user(user, res_buffer, message_length);
+        return;
+    }
+
+    char *dest = malloc(sizeof(topic) + 1);
+    strcpy(dest, topic);
+    channel->topic = dest;
+
+    for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
+        int participant_index = channel->participants[i];
+        if (participant_index == -1) {
+            continue;
+        }
+        
+        user_t participant = users[participant_index];
+        int message_length = add_channel_topic(&participant, channel, res_buffer, sizeof(res_buffer));
         send_response_to_user(&participant, res_buffer, message_length);
     }
 }
@@ -550,6 +611,10 @@ void process_user_data(user_t* user, int user_index, tcp_buf_t tcp_buffer) {
             char* target = strtok_r(NULL, " ", &cmd_save_ptr);
             char* message = strtok_r(NULL, "", &cmd_save_ptr);
             process_part(user, user_index, target, message);
+        } else if (strcasecmp(user_cmd, "TOPIC") == 0) {
+            char* channel = strtok_r(NULL, " ", &cmd_save_ptr);
+            char* topic = strtok_r(NULL, "", &cmd_save_ptr);
+            process_topic(user, user_index, channel, topic + 1);
         }
 
         cmd_line = strtok_r(NULL, "\r\n", &save_ptr);
