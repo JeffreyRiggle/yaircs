@@ -12,7 +12,8 @@
         "-O0",
         "-Wall",
         "-Wextra",
-        "${workspaceFolder}/main.c",
+        "${workspaceFolder}/mac_irc.c",
+        "${workspaceFolder}/irc.c",
         "-o",
         "${workspaceFolder}/irc-server"
       ],
