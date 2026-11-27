@@ -15,10 +15,12 @@
 #define RPL_TOPICWHOTIME 333
 #define RPL_NAMEREPLY 353
 #define RPL_ENDOFNAMES 366
+#define ERR_NOSUCHCHANNEL 403
 #define ERR_NONICKNAMEGIVEN 431
 #define ERR_ERRONEUSNICKNAME 432
 #define ERR_NICKNAMEINUSE 433
 #define ERR_NICKCOLLISION 436
+#define ERR_NOTONCHANNEL 442
 #define ERR_NEEDMOREPARAMS 461
 #define ERR_ALREADYREGISTERED 462
 #define ERR_BADCHANNELKEY 475
@@ -419,9 +421,8 @@ void process_private_message(user_t* user, int user_index, char* target, char* m
             continue;
         }
         
-        // Finished reading participants.
         if (participant_index == -1) {
-            break;
+            continue;
         }
         
         user_t participant = users[participant_index];
@@ -433,6 +434,80 @@ void process_private_message(user_t* user, int user_index, char* target, char* m
             user->host_name,
             target,
             message
+        );
+
+        send_response_to_user(&participant, res_buffer, message_length);
+    }
+}
+
+void process_part(user_t* user, int user_index, char* channel_name, char* reason) {
+    // https://modern.ircdocs.horse/#part-message
+    char res_buffer[512];
+    int message_length = 0;
+    channel_t* channel = find_channel(channel_name);
+
+    if (channel == NULL) {
+        message_length = snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":%s %03d %s %s :No such channel\r\n",
+            server_name, ERR_NOSUCHCHANNEL,
+            user->nick ? user->nick : "*",
+            channel_name
+        );
+
+        send_response_to_user(user, res_buffer, message_length);
+        return;
+    }
+
+    // If they are not in the channel ERR_NOTINCHANNEL 442
+    int channel_index = -1;
+    for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
+        if (channel->participants[i] == user_index) {
+            channel_index = i;
+            break;
+        }
+    }
+
+    if (channel_index == -1) {
+        message_length = snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":%s %03d %s %s :You're not on that channel\r\n",
+            server_name, ERR_NOTONCHANNEL,
+            user->nick ? user->nick : "*",
+            channel_name
+        );
+
+        send_response_to_user(user, res_buffer, message_length);
+        return;
+    }
+
+    channel->participants[channel_index] = -1;
+
+    if (reason == NULL) {
+        return;
+    }
+
+    for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
+        int participant_index = channel->participants[i];
+        // Don't send to self
+        if (participant_index == user_index) {
+            continue;
+        }
+        
+        // Finished reading participants.
+        if (participant_index == -1) {
+            continue;
+        }
+        
+        user_t participant = users[participant_index];
+        message_length = snprintf(
+            res_buffer, sizeof(res_buffer),
+            ":%s!%s@%s PRIVMSG %s %s\r\n",
+            user->nick,
+            user->user_name,
+            user->host_name,
+            channel_name,
+            reason
         );
 
         send_response_to_user(&participant, res_buffer, message_length);
@@ -471,6 +546,10 @@ void process_user_data(user_t* user, int user_index, tcp_buf_t tcp_buffer) {
             char* target = strtok_r(NULL, " ", &cmd_save_ptr);
             char* message = strtok_r(NULL, "", &cmd_save_ptr);
             process_private_message(user, user_index, target, message);
+        } else if (strcasecmp(user_cmd, "PART") == 0) {
+            char* target = strtok_r(NULL, " ", &cmd_save_ptr);
+            char* message = strtok_r(NULL, "", &cmd_save_ptr);
+            process_part(user, user_index, target, message);
         }
 
         cmd_line = strtok_r(NULL, "\r\n", &save_ptr);
