@@ -1,3 +1,5 @@
 irc-server
+irc-server-repl
 main
+repl
 *.dSYM/

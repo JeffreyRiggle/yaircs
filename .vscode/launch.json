@@ -9,7 +9,17 @@
       "program": "${workspaceFolder}/irc-server",
       "cwd": "${workspaceFolder}",
       "args": [],
-      "preLaunchTask": "Build C",
+      "preLaunchTask": "Build C Mac",
+      "stopOnEntry": false
+    },
+    {
+      "name": "Debug IRC Server REPL",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/irc-server-repl",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "preLaunchTask": "Build C REPL",
       "stopOnEntry": false
     }
   ]

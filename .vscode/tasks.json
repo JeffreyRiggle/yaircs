@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Build C",
+      "label": "Build C Mac",
       "type": "process",
       "command": "clang",
       "args": [
@@ -16,6 +16,30 @@
         "${workspaceFolder}/irc.c",
         "-o",
         "${workspaceFolder}/irc-server"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": ["$gcc"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Build C REPL",
+      "type": "process",
+      "command": "clang",
+      "args": [
+        "-std=c11",
+        "-g",
+        "-O0",
+        "-Wall",
+        "-Wextra",
+        "${workspaceFolder}/repl_irc.c",
+        "${workspaceFolder}/irc.c",
+        "-o",
+        "${workspaceFolder}/irc-server-repl"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
