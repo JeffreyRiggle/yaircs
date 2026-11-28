@@ -184,7 +184,6 @@ channel_t* get_or_create_channel(char* channel_name, char* channel_key) {
     strcpy(cn_dest, channel_name);
     
     new_channel->name = cn_dest;
-    new_channel->participants[0] = -1;
     
     if (channel_key != NULL) {
         char* k_dest = malloc(sizeof(channel_key) + 1);
@@ -239,7 +238,7 @@ int add_channel_topic(user_t* user, channel_t* channel, char* buffer, int buffer
     );
 }
 
-void process_join(user_t* user, int user_index, char* channel_name, char* channel_key) {
+void process_join(user_t* user, char* channel_name, char* channel_key) {
     // https://modern.ircdocs.horse/#join-message
     // TODO validation
 
@@ -258,10 +257,9 @@ void process_join(user_t* user, int user_index, char* channel_name, char* channe
         return;
     }
     
-    for (int i = 0; i < sizeof(channel->participants) / sizeof(user->fd); i++) {
-        if (channel->participants[i] == -1) {
-            channel->participants[i] = user_index;
-            channel->participants[i + 1] = -1;
+    for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
+        if (channel->participants[i] == NULL) {
+            channel->participants[i] = user;
             break;
         }
     }
@@ -298,14 +296,14 @@ void process_join(user_t* user, int user_index, char* channel_name, char* channe
     );
     for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
         // Finished reading participants.
-        if (channel->participants[i] == -1) {
+        if (channel->participants[i] == NULL) {
             break;
         }
 
         message_length += snprintf(
             res_buffer + message_length, sizeof(res_buffer),
             " %s",
-            users[channel->participants[i]].nick 
+            channel->participants[i]->nick 
         );
     }
     message_length += snprintf(
@@ -317,7 +315,7 @@ void process_join(user_t* user, int user_index, char* channel_name, char* channe
     send_response_to_user(user, res_buffer, message_length);
 }
 
-void process_private_message(user_t* user, int user_index, char* target, char* message) {
+void process_private_message(user_t* user, char* target, char* message) {
     // https://modern.ircdocs.horse/#privmsg-message
     // TODO validation
     // For now lets just assume we can only support channels
@@ -325,17 +323,12 @@ void process_private_message(user_t* user, int user_index, char* target, char* m
 
     char res_buffer[512];
     for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
-        int participant_index = channel->participants[i];
+        user_t* participant = channel->participants[i];
         // Don't send to self
-        if (participant_index == user_index) {
+        if (participant == NULL || participant == user) {
             continue;
         }
         
-        if (participant_index == -1) {
-            continue;
-        }
-        
-        user_t participant = users[participant_index];
         int message_length = snprintf(
             res_buffer, sizeof(res_buffer),
             ":%s!%s@%s PRIVMSG %s %s\r\n",
@@ -346,7 +339,7 @@ void process_private_message(user_t* user, int user_index, char* target, char* m
             message
         );
 
-        send_response_to_user(&participant, res_buffer, message_length);
+        send_response_to_user(participant, res_buffer, message_length);
     }
 }
 
@@ -376,7 +369,7 @@ void send_not_in_channel(user_t* user, char* channel_name) {
     send_response_to_user(user, res_buffer, message_length);
 }
 
-void process_part(user_t* user, int user_index, char* channel_name, char* reason) {
+void process_part(user_t* user, char* channel_name, char* reason) {
     // https://modern.ircdocs.horse/#part-message
     channel_t* channel = find_channel(channel_name);
 
@@ -387,7 +380,7 @@ void process_part(user_t* user, int user_index, char* channel_name, char* reason
 
     int channel_index = -1;
     for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
-        if (channel->participants[i] == user_index) {
+        if (channel->participants[i] == user) {
             channel_index = i;
             break;
         }
@@ -398,7 +391,7 @@ void process_part(user_t* user, int user_index, char* channel_name, char* reason
         return;
     }
 
-    channel->participants[channel_index] = -1;
+    channel->participants[channel_index] = NULL;
 
     if (reason == NULL) {
         return;
@@ -406,18 +399,12 @@ void process_part(user_t* user, int user_index, char* channel_name, char* reason
 
     char res_buffer[512];
     for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
-        int participant_index = channel->participants[i];
+        user_t* participant = channel->participants[i];
         // Don't send to self
-        if (participant_index == user_index) {
+        if (participant == NULL || participant == user) {
             continue;
         }
-        
-        // Finished reading participants.
-        if (participant_index == -1) {
-            continue;
-        }
-        
-        user_t participant = users[participant_index];
+
         int message_length = snprintf(
             res_buffer, sizeof(res_buffer),
             ":%s!%s@%s PRIVMSG %s %s\r\n",
@@ -428,11 +415,11 @@ void process_part(user_t* user, int user_index, char* channel_name, char* reason
             reason
         );
 
-        send_response_to_user(&participant, res_buffer, message_length);
+        send_response_to_user(participant, res_buffer, message_length);
     }
 }
 
-void process_topic(user_t* user, int user_index, char* channel_name, char* topic) {
+void process_topic(user_t* user, char* channel_name, char* topic) {
     // https://modern.ircdocs.horse/#topic-message
     char res_buffer[512]; 
     channel_t* channel = find_channel(channel_name);
@@ -444,7 +431,7 @@ void process_topic(user_t* user, int user_index, char* channel_name, char* topic
 
     int channel_index = -1;
     for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
-        if (channel->participants[i] == user_index) {
+        if (channel->participants[i] == user) {
             channel_index = i;
             break;
         }
@@ -466,18 +453,17 @@ void process_topic(user_t* user, int user_index, char* channel_name, char* topic
     channel->topic = dest;
 
     for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
-        int participant_index = channel->participants[i];
-        if (participant_index == -1) {
+        user_t* participant = channel->participants[i];
+        if (participant == NULL) {
             continue;
         }
         
-        user_t participant = users[participant_index];
-        int message_length = add_channel_topic(&participant, channel, res_buffer, sizeof(res_buffer));
-        send_response_to_user(&participant, res_buffer, message_length);
+        int message_length = add_channel_topic(participant, channel, res_buffer, sizeof(res_buffer));
+        send_response_to_user(participant, res_buffer, message_length);
     }
 }
 
-void process_user_data(user_t* user, int user_index, tcp_buf_t tcp_buffer) {
+void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
     printf("Message from fd %d:\r\n %s\r\n", user->fd, tcp_buffer.body);
     char *save_ptr = NULL;
     char *cmd_line = strtok_r(tcp_buffer.body, "\r\n", &save_ptr);
@@ -504,19 +490,19 @@ void process_user_data(user_t* user, int user_index, tcp_buf_t tcp_buffer) {
             // TODO support multi channel joins
             char* channel = strtok_r(NULL, " ", &cmd_save_ptr);
             char* channel_key = strtok_r(NULL, " ", &cmd_save_ptr);
-            process_join(user, user_index, channel, channel_key);
+            process_join(user, channel, channel_key);
         } else if (strcasecmp(user_cmd, "PRIVMSG") == 0) {
             char* target = strtok_r(NULL, " ", &cmd_save_ptr);
             char* message = strtok_r(NULL, "", &cmd_save_ptr);
-            process_private_message(user, user_index, target, message);
+            process_private_message(user, target, message);
         } else if (strcasecmp(user_cmd, "PART") == 0) {
             char* target = strtok_r(NULL, " ", &cmd_save_ptr);
             char* message = strtok_r(NULL, "", &cmd_save_ptr);
-            process_part(user, user_index, target, message);
+            process_part(user, target, message);
         } else if (strcasecmp(user_cmd, "TOPIC") == 0) {
             char* channel = strtok_r(NULL, " ", &cmd_save_ptr);
             char* topic = strtok_r(NULL, "", &cmd_save_ptr);
-            process_topic(user, user_index, channel, topic + 1);
+            process_topic(user, channel, topic + 1);
         }
 
         cmd_line = strtok_r(NULL, "\r\n", &save_ptr);

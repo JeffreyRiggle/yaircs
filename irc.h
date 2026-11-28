@@ -35,7 +35,7 @@ typedef struct {
     char* created_by;
     char* created_at;
     char* key;
-    int participants[256];
+    user_t* participants[256];
 } channel_t;
 
 // I don't really like this name
@@ -51,6 +51,6 @@ extern int next_user_slot;
 extern channel_t channels [1024];
 extern int next_channel_index;
 
-void process_user_data(user_t* user, int user_index, tcp_buf_t tcp_buffer);
+void process_user_data(user_t* user, tcp_buf_t tcp_buffer);
 int get_client_index(int fd);
 #endif

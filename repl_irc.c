@@ -57,7 +57,7 @@ int main() {
             req.len = sizeof(command);
 
             int client_index = get_client_index(fd);
-            process_user_data(&users[client_index], client_index, req);
+            process_user_data(&users[client_index], req);
         }
     }
 }

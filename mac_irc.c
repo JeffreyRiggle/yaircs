@@ -106,7 +106,7 @@ void process_event(struct kevent evt, int server_fd, struct kevent* change_event
                 return;
             }
 
-            process_user_data(&users[client_index], client_index, tcp_buffer);
+            process_user_data(&users[client_index], tcp_buffer);
             return;
         }
 
