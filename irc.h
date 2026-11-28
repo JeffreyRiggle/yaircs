@@ -51,6 +51,6 @@ extern int next_user_slot;
 extern channel_t channels [1024];
 extern int next_channel_index;
 
-void process_user_data(user_t* user, tcp_buf_t tcp_buffer);
+int process_user_data(user_t* user, tcp_buf_t tcp_buffer);
 int get_client_index(int fd);
 #endif

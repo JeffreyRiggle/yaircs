@@ -57,7 +57,9 @@ int main() {
             req.len = sizeof(command);
 
             int client_index = get_client_index(fd);
-            process_user_data(&users[client_index], req);
+            if (process_user_data(&users[client_index], req) != 0) {
+                printf("Closing session for %d\n", users[client_index].fd);
+            }
         }
     }
 }

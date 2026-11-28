@@ -463,8 +463,47 @@ void process_topic(user_t* user, char* channel_name, char* topic) {
     }
 }
 
-void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
+void process_quit(user_t* user, char* reason) {
+    char res_buffer[512];
+    for (int i = 0; i < sizeof(channels) / sizeof(channels[0]); i++) {
+        channel_t* channel = &channels[i];
+        int user_in_channel = 0;
+        for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
+            if (channel->participants[i] == user) {
+                channel->participants[i] = NULL;
+                user_in_channel = 1;
+                break;
+            }
+        }
+
+        if (user_in_channel == 0) {
+            continue;
+        }
+
+        for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
+            user_t* participant = channel->participants[i];
+            if (participant == NULL) {
+                continue;
+            }
+        
+            int message_length = snprintf(
+                res_buffer, sizeof(res_buffer),
+                ":%s!%s@%s PRIVMSG %s %s\r\n",
+                user->nick,
+                user->user_name,
+                user->host_name,
+                channel->name,
+                reason
+            );
+
+            send_response_to_user(participant, res_buffer, message_length);
+        }
+    }
+}
+
+int process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
     printf("Message from fd %d:\r\n %s\r\n", user->fd, tcp_buffer.body);
+    int terminate_session = 0;
     char *save_ptr = NULL;
     char *cmd_line = strtok_r(tcp_buffer.body, "\r\n", &save_ptr);
 
@@ -503,6 +542,10 @@ void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
             char* channel = strtok_r(NULL, " ", &cmd_save_ptr);
             char* topic = strtok_r(NULL, "", &cmd_save_ptr);
             process_topic(user, channel, topic + 1);
+        } else if (strcasecmp(user_cmd, "QUIT") == 0) {
+            char* reason = strtok_r(NULL, "", &cmd_save_ptr);
+            process_quit(user, reason);
+            terminate_session = 1;
         }
 
         cmd_line = strtok_r(NULL, "\r\n", &save_ptr);
@@ -519,4 +562,6 @@ void process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
         );
         send_response_to_user(user, res_buffer, message_length);
     }
+
+    return terminate_session;
 }

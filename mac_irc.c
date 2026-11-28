@@ -77,10 +77,8 @@ void process_event(struct kevent evt, int server_fd, struct kevent* change_event
             close(client_fd);
         }
 
-        user_t user = {0};
-        user.fd = client_fd;
-        user.host_name = get_address(&client_addr);
-        users[next_user_slot++] = user;
+        users[next_user_slot].fd = client_fd;
+        users[next_user_slot++].host_name = get_address(&client_addr);
         return;
     }
 
@@ -106,7 +104,10 @@ void process_event(struct kevent evt, int server_fd, struct kevent* change_event
                 return;
             }
 
-            process_user_data(&users[client_index], tcp_buffer);
+            if (process_user_data(&users[client_index], tcp_buffer) != 0) {
+                // TODO we are leaking sessions
+                close(target_fd);
+            }
             return;
         }
 
