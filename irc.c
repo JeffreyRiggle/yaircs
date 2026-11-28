@@ -11,6 +11,9 @@
 #include "platform.h"
 
 #define RLP_WELCOME 1
+#define RPL_LISTSTART 321
+#define RPL_LIST 322
+#define RPL_LISTEND 323
 #define RPL_NOTOPIC 331
 #define RPL_TOPIC 332
 #define RPL_TOPICWHOTIME 333
@@ -521,6 +524,47 @@ void process_names(user_t* user, char* channel_name) {
     send_response_to_user(user, res_buffer, message_length);
 }
 
+void process_list(user_t* user) {
+    // https://modern.ircdocs.horse/#list-message
+    char res_buffer[512];
+
+    int message_length = snprintf(
+        res_buffer, sizeof(res_buffer),
+        "%s %03d %s Channel: Users Name\r\n",
+        server_name, RPL_LISTSTART, user->nick
+    );
+
+    for (int i = 0; i < sizeof(channels) / sizeof(channels[0]); i++) {
+        channel_t channel = channels[i];
+
+        if (channel.name == NULL) {
+            continue;
+        }
+
+        int participant_count = 0;
+        for (int i = 0; i < sizeof(channel.participants) / sizeof(channel.participants[0]); i++) {
+            if (channel.participants[i] != NULL) {
+                participant_count++;
+            }
+        }
+
+        message_length += snprintf(
+            res_buffer + message_length, sizeof(res_buffer),
+            "%s %03d %s %s %d: %s\r\n",
+            server_name, RPL_LIST, user->nick,
+            channel.name, participant_count, channel.topic
+        );
+    }
+
+    message_length += snprintf(
+        res_buffer + message_length, sizeof(res_buffer),
+        "%s %03d %s: End of /LIST\r\n",
+        server_name, RPL_LISTEND, user->nick
+    );
+
+    send_response_to_user(user, res_buffer, message_length);
+}
+
 int process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
     printf("Message from fd %d:\r\n %s\r\n", user->fd, tcp_buffer.body);
     int terminate_session = 0;
@@ -569,6 +613,9 @@ int process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
         } else if (strcasecmp(user_cmd, "NAMES") == 0) {
             char* channel_name = strtok_r(NULL, "", &cmd_save_ptr);
             process_names(user, channel_name);
+        } else if (strcasecmp(user_cmd, "LIST") == 0) {
+            // TODO handle query commands
+            process_list(user);
         }
 
         cmd_line = strtok_r(NULL, "\r\n", &save_ptr);

@@ -45,7 +45,7 @@ typedef struct {
 } tcp_buf_t;
 
 extern char message_buffer[4096];
-// Consider how many users/channels we actually want to support
+// Consider how many users/channels we actually want to support realistically 65535 is our max
 extern user_t users[1024];
 extern int next_user_slot;
 extern channel_t channels [1024];
