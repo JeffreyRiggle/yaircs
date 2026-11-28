@@ -40,7 +40,7 @@ int main() {
         char *save_ptr = NULL;
         char* cmd = strtok_r(buffer, " ", &save_ptr);
 
-        if (strcasecmp(cmd, "exit") == 0) {
+        if (strcasecmp(cmd, "exit\n") == 0) {
             break;
         }
 
@@ -62,4 +62,6 @@ int main() {
             }
         }
     }
+
+    return 0;
 }

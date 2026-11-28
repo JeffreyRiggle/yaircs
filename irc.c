@@ -238,6 +238,32 @@ int add_channel_topic(user_t* user, channel_t* channel, char* buffer, int buffer
     );
 }
 
+int add_names(user_t* user, channel_t* channel, char* buffer, int buffer_size) {
+    int message_length = message_length = snprintf(
+        buffer, buffer_size,
+        ":%s %03d %s = %s :",
+        server_name, RPL_NAMEREPLY, user->nick, channel->name 
+    );
+    for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
+        if (channel->participants[i] == NULL) {
+            continue;
+        }
+
+        message_length += snprintf(
+            buffer + message_length, buffer_size,
+            " %s",
+            channel->participants[i]->nick 
+        );
+    }
+    message_length += snprintf(
+        buffer + message_length, buffer_size,
+        "\r\n:%s %03d %s %s :End of /Names list\r\n",
+        server_name, RPL_ENDOFNAMES, user->nick, channel->name
+    );
+
+    return message_length;
+}
+
 void process_join(user_t* user, char* channel_name, char* channel_key) {
     // https://modern.ircdocs.horse/#join-message
     // TODO validation
@@ -289,28 +315,7 @@ void process_join(user_t* user, char* channel_name, char* channel_key) {
     }
     
     // List of users in the channel
-    message_length += snprintf(
-        res_buffer + message_length, sizeof(res_buffer),
-        ":%s %03d %s = %s :",
-        server_name, RPL_NAMEREPLY, user->nick, channel_name 
-    );
-    for (int i = 0; i < sizeof(channel->participants) / sizeof(channel->participants[0]); i++) {
-        // Finished reading participants.
-        if (channel->participants[i] == NULL) {
-            break;
-        }
-
-        message_length += snprintf(
-            res_buffer + message_length, sizeof(res_buffer),
-            " %s",
-            channel->participants[i]->nick 
-        );
-    }
-    message_length += snprintf(
-        res_buffer + message_length, sizeof(res_buffer),
-        "\r\n:%s %03d %s %s :End of /Names list\r\n",
-        server_name, RPL_ENDOFNAMES, user->nick, channel_name
-    );
+    message_length += add_names(user, channel, res_buffer + message_length, sizeof(res_buffer));
 
     send_response_to_user(user, res_buffer, message_length);
 }
@@ -464,6 +469,7 @@ void process_topic(user_t* user, char* channel_name, char* topic) {
 }
 
 void process_quit(user_t* user, char* reason) {
+    // https://modern.ircdocs.horse/#quit-message
     char res_buffer[512];
     for (int i = 0; i < sizeof(channels) / sizeof(channels[0]); i++) {
         channel_t* channel = &channels[i];
@@ -499,6 +505,20 @@ void process_quit(user_t* user, char* reason) {
             send_response_to_user(participant, res_buffer, message_length);
         }
     }
+}
+
+void process_names(user_t* user, char* channel_name) {
+    // https://modern.ircdocs.horse/#names-message
+    channel_t* channel = find_channel(channel_name);
+
+    // Doc does not say to not found odd, its probably a doc mistake.
+    if (channel == NULL) {
+        return;
+    }
+
+    char res_buffer[512];
+    int message_length = add_names(user, channel, res_buffer, sizeof(res_buffer));
+    send_response_to_user(user, res_buffer, message_length);
 }
 
 int process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
@@ -546,6 +566,9 @@ int process_user_data(user_t* user, tcp_buf_t tcp_buffer) {
             char* reason = strtok_r(NULL, "", &cmd_save_ptr);
             process_quit(user, reason);
             terminate_session = 1;
+        } else if (strcasecmp(user_cmd, "NAMES") == 0) {
+            char* channel_name = strtok_r(NULL, "", &cmd_save_ptr);
+            process_names(user, channel_name);
         }
 
         cmd_line = strtok_r(NULL, "\r\n", &save_ptr);
